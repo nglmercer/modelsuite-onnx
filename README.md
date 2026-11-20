@@ -70,8 +70,9 @@ Details and caveats: [`docs/feasibility.md`](docs/feasibility.md). `rust-probe/`
 program used for the CPU-vs-GPU comparison (it uses SonicBoom's `onnx_runtime` module, so it is a
 reference, not a standalone crate).
 
-## Publishing the ONNX files
+## Download the converted files
 
-Not done yet. Plan: a Hugging Face model repo with `license: cc-by-nc-4.0`, `base_model`
-pointing at `software-mansion/Reverb-TTS`, the six graphs, `SHA256SUMS`, and a model card that
-links back here. Create it private first and make it public once the codec license is confirmed.
+* Reverb transformer graphs (CC BY-NC 4.0): <https://huggingface.co/melser/Reverb-TTS-onnx>
+* Higgs Audio v2 codec graphs (Boson Higgs Audio 2 Community License, Meta Llama 3 terms): <https://huggingface.co/melser/Higgs-Audio-2-Tokenizer-onnx>
+
+Both list `SHA256SUMS`. Pin a commit hash when downloading from your app.

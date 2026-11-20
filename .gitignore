@@ -1,0 +1,9 @@
+__pycache__/
+*.onnx
+*.onnx.data
+*.wav
+*.pt
+venv/
+onnx_*/
+gen/
+bis/

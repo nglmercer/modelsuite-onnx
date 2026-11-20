@@ -1,0 +1,14 @@
+# Versions the exports and parity checks in this repo were produced with (Python 3.14, CPU).
+torch==2.15.0
+torchaudio==2.11.1
+transformers==5.23.0
+reverb-tts==1.0.0
+onnx==1.23.2
+onnxscript==0.7.2
+onnxruntime==1.32.0
+safetensors==0.8.0
+tokenizers==0.23.3
+huggingface_hub==2.4.0
+numpy==2.5.5
+scipy==1.18.1
+soundfile==0.14.0

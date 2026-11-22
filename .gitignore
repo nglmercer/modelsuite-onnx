@@ -7,3 +7,8 @@ venv/
 onnx_*/
 gen/
 bis/
+
+venv-optimum/
+artifacts/
+*.egg-info/
+.pytest_cache/

@@ -1,4 +1,77 @@
-# Reverb-TTS to ONNX
+# modelsuite: model conversion, optimisation, validation and benchmarking
+
+A plugin-based Python framework that **discovers, analyses, converts, optimises, validates and benchmarks** ML models, starting with ONNX.
+It supports many architectures through reusable exporters and custom *adapters*; it does **not** promise to convert every checkpoint, and
+it tells you, with numbers, when a conversion is wrong. The first reference implementation is [Reverb-TTS](#reverb-tts-to-onnx-the-original-reference-conversion)
+(the scripts that used to be this repo's whole content now live behind a Reverb adapter and a regression test).
+
+```sh
+python -m venv venv && . venv/bin/activate
+pip install -e '.[onnx,torch,hf,reverb]' --extra-index-url https://download.pytorch.org/whl/cpu   # the core alone needs only numpy/pydantic/pyyaml/psutil
+
+modelsuite inspect  hf-internal-testing/tiny-random-LlamaForCausalLM        # what is it? (no weights downloaded)
+modelsuite analyze  hf-internal-testing/tiny-random-LlamaForCausalLM        # can it be converted, how, with which caveats?
+modelsuite convert  hf-internal-testing/tiny-random-LlamaForCausalLM -o out --precision fp16-weights --quantize int8-dynamic --benchmark
+modelsuite validate out                      # re-check any artifact against its bundled golden references
+modelsuite validate ./my_checkpoint out      # ...or against the live original model (also runs stateful + quality checks)
+modelsuite optimize out --precision fp16     # add variants to an existing artifact
+modelsuite benchmark out --providers cpu,cuda
+modelsuite providers                         # which execution providers *actually run* here
+modelsuite adapters ; modelsuite exporters
+```
+
+`<model>` is a local directory, a Hugging Face id (`org/name`, optional `--revision`) or a Python spec (`file.py:factory`) for a custom PyTorch module.
+Add `--json` for machine-readable output; every step also writes JSON reports into the artifact. Exit codes: `0` ok, `1` error, `2` completed but validation failed / model unsupported.
+
+### What you get
+
+* **A manifest** (`manifest.json`) with the source model and revision, adapter/exporter versions, component graphs and signatures, precision and quantisation per variant, assets,
+  runtime requirements, validation and benchmark results, model + dependency licenses and a redistribution verdict, plus the exact environment and job configuration.
+  Files are checksummed; multi-graph models, external ONNX weights and tokenizer/config assets are first-class.
+* **Validation as a first-class feature:** structural ONNX checks, original-vs-exported numerical parity (including *dynamic-shape* cases and padding masks),
+  step-by-step **stateful** tests (KV caches, recurrent state), per-provider agreement with CPU, and task-level quality checks. Golden references of the *original* model travel with the artifact.
+* **Measured optimisation:** fp16 / bf16-weights / int8 dynamic+static / int4 / graph optimisation, each validated and benchmarked; the recommendation only considers variants that passed, and says when a smaller variant is slower.
+* **Honest providers:** a provider counts only if a probe graph ran on it; a session that silently falls back to CPU is an error, not a benchmark.
+* **Resumable, reproducible jobs:** re-run the same command to continue; a different configuration in the same output directory is refused.
+
+### Verified in this repository (CPU, Python 3.14, torch 2.15, onnxruntime 1.32)
+
+| Case | Result |
+|---|---|
+| Tiny BERT classifier (HF) | exported, parity incl. padded/dynamic shapes, fp16 variant passes |
+| Tiny Llama (HF, local and from the Hub) | one prefill+decode graph with KV cache; 8-step stateful decode, cache consistency and greedy generation == `transformers.generate()` |
+| Custom PyTorch module (`file.py:factory`) | full pipeline; the training-mode hazard of `torch.onnx.export` is guarded |
+| Custom adapter **and** custom exporter from a plugin file, no torch | full pipeline |
+| **Reverb-TTS, real 297M checkpoint + Higgs codec** (`pytest -m slow`) | all 6 graphs exported; official sampler through ONNX reproduces **100 %** of the codes at all 8 codebooks; codec decoder diff 6e-7, encoder codes 100 % identical; sizes match the table below (see [`docs/reverb.md`](docs/reverb.md)) |
+| **Reverb-TTS** adapter on a tiny fixture (every test run) | official sampler through the ONNX graphs reproduces **100 %** of the original codes; prefix→target KV hand-off passes; dynamic-int8 correctly **fails** (43 % agreement) |
+| Optimum exporter (separate interpreter) | exported + validated against the original (prefill) |
+
+`pytest` runs 108 offline tests in ~25 s; `pytest -m network` adds the Hub tests. What is **not** verified (non-CPU providers, other LLM families, multi-GB models, ORT GenAI, Olive) is listed in
+[`docs/limitations.md`](docs/limitations.md); the roadmap items not yet built are at the end of that file.
+
+### Documentation
+
+* [`docs/architecture.md`](docs/architecture.md): modules, pipeline, artifact + manifest, validation, providers
+* [`docs/adapters.md`](docs/adapters.md): writing an adapter / exporter, plugin loading, how to test one, gotchas
+* [`docs/reverb.md`](docs/reverb.md): how the original scripts map onto the adapter, regression results
+* [`docs/limitations.md`](docs/limitations.md): unsupported cases, numerical caveats, what is untested
+
+### Roadmap
+
+| Phase | Status |
+|---|---|
+| 1 Foundation: interfaces, registry, discovery, config, manifests | done |
+| 2 Exporters: torch (legacy + dynamo), Optimum, generic Transformers | done (Optimum via a separate interpreter) |
+| 3 Validation: structural, runtime, parity, dynamic shapes, stateful, reports | done |
+| 4 Optimisation: precision, quantisation, graph optimisation, recommendation | done |
+| 5 Benchmarking: provider discovery, latency/throughput/memory | done on CPU; other providers implemented, untested here |
+| 6 Specialised adapters | Reverb done; Supertonic, Haru **not started** |
+| 7 Extended ecosystem: ORT GenAI, diffusion, TF/JAX, GGUF | ORT GenAI wrapper only; rest not started |
+| 8 User interface | not started |
+
+---
+
+## Reverb-TTS to ONNX: the original reference conversion
 
 Scripts, checks and notes to convert [software-mansion/Reverb-TTS](https://huggingface.co/software-mansion/Reverb-TTS)
 (a masked-diffusion TTS with Qwen3 layers and the Higgs Audio v2 codec) to ONNX, so it can run in
@@ -10,7 +83,7 @@ SonicBoom TTS server; nothing here depends on it except `rust-probe/`.
 > tokenizer has its own license: check it before redistributing the codec graphs.
 > This repo does not contain any weights.
 
-## What gets exported
+### What gets exported
 
 Reverb is not autoregressive: it fills a frames x 8-codebook grid in 8 masked passes plus 2
 polish passes over the whole target, attending to a cached prefix (text + reference codes).
@@ -31,7 +104,7 @@ passes: `embed_target` -> `core` (past = prefix keys/values; `bias` is 0, or `po
 reference columns for the two polish passes) -> `heads`. Discard `core`'s `new_k/new_v` for target
 passes. Sampling logic is `reverb_tts/sampler.py`.
 
-## Reproduce
+### Reproduce
 
 ```sh
 python -m venv venv && . venv/bin/activate
@@ -57,7 +130,7 @@ REF_WAV=reference.wav REF_TEXT="exact transcript of the clip" python gen_eval.py
 python score_dir.py gen/preset1 gen/preset2 gen/stref    # needs faster-whisper
 ```
 
-## Results (CPU, BC-250 APU, 2026-11-20)
+### Results (CPU, BC-250 APU, 2026-11-20)
 
 * ONNX graphs reproduce the official codes **100 %** (all 8 codebooks) and a bit-identical waveform.
 * Codec decoder max waveform diff 7e-7; encoder 99.5-100 % identical codes with the same
@@ -70,7 +143,7 @@ Details and caveats: [`docs/feasibility.md`](docs/feasibility.md). `rust-probe/`
 program used for the CPU-vs-GPU comparison (it uses SonicBoom's `onnx_runtime` module, so it is a
 reference, not a standalone crate).
 
-## Download the converted files
+### Download the converted files
 
 * Reverb transformer graphs (CC BY-NC 4.0): <https://huggingface.co/melser/Reverb-TTS-onnx>
 * Higgs Audio v2 codec graphs (Boson Higgs Audio 2 Community License, Meta Llama 3 terms): <https://huggingface.co/melser/Higgs-Audio-2-Tokenizer-onnx>

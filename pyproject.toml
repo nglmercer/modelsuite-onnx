@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modelsuite"
+version = "0.1.0"
+description = "Plugin-based framework to discover, analyze, convert, optimize, validate and benchmark ML models across formats and execution providers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# The core is deliberately light: no torch, no transformers. Everything heavy is an extra.
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.5",
+  "pyyaml>=6",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+onnx = ["onnx>=1.16", "onnxruntime>=1.18"]
+torch = ["torch>=2.3", "onnxscript>=0.1"]
+hf = ["transformers>=4.40", "huggingface_hub>=0.23", "safetensors>=0.4"]
+fp16 = ["onnxconverter-common>=1.14"]
+reverb = ["reverb-tts>=1.0", "torchaudio", "soundfile"]
+audio-eval = ["faster-whisper", "scipy", "soundfile"]
+test = ["pytest>=8"]
+all = ["modelsuite[onnx,torch,hf,fp16]"]
+
+[project.scripts]
+modelsuite = "modelsuite.cli.main:main"
+
+# Third-party packages register adapters / exporters here; no change to this repo needed.
+[project.entry-points."modelsuite.adapters"]
+reverb-tts = "modelsuite.adapters.reverb:ReverbAdapter"
+hf-transformers = "modelsuite.adapters.hf_transformers:HFTransformersAdapter"
+torch-module = "modelsuite.adapters.torch_module:TorchModuleAdapter"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "network: needs network access (Hugging Face Hub)",
+  "slow: downloads or exports a real, large checkpoint",
+  "provider: needs a non-CPU execution provider",
+]
+addopts = "-m 'not network and not slow and not provider'"

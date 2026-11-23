@@ -56,7 +56,18 @@ venv/bin/python examples/phonon/run_onnx.py artifacts/phonon-40m-multilingual \
 ```
 
 `--voice` acepta un archivo `.safetensors` local, un nombre (`Iker`, `Noa`, `Marcos`, `Rebeca`...) o un
-`voice_id` del catálogo; `--lang es` necesita `pip install ptts` y reescribe p. ej. `5 €` → `5 euros`.
+`voice_id` del catálogo; `--lang es` necesita `ptts` y reescribe p. ej. `5 €` → `5 euros`.
+En Arch (PEP 668) **no** instales con `pip` del sistema: usa el venv del repo, que ya trae
+`onnxruntime`, `tokenizers`, `safetensors` y `huggingface_hub`:
+
+```sh
+cd ~/Documentos/GitHub/Reverb-TTS-onnx
+. venv/bin/activate
+python -m pip install --no-deps ptts        # sólo para --lang; con --lang none no hace falta
+python examples/phonon/run_onnx.py artifacts/phonon-40m-multilingual \
+  "Hola desde Phonon." -o speech_es.wav --voice Iker --lang es
+```
+
 Otras voces/es-locale y sus IDs están en https://huggingface.co/gradium/phonon-voices (`voices.jsonl`).
 Si se quiere un modelo sólo español, el mismo plugin sirve para `gradium/phonon-40m-es` (repositorio
 gated; hay que aceptar su licencia).

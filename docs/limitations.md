@@ -54,6 +54,11 @@ in this repository: the machine it was built on has ONNX Runtime with `CPUExecut
 named source with your privileges** (so does `modelsuite inspect` on a python spec, because the factory builds the model). Only point them at code you have read.
 The suite never executes code found inside a *downloaded model repository* unless `trust_remote_code` is set. Hub downloads use safetensors / config files only for analysis.
 
+## ZONOS3-Mini example
+
+`examples/zonos3-mini` is verified on the real LM weights in a standalone comparison and end to end on a tiny release; the **real codec decoder and the full
+real-weights pipeline were not completed** (the development machine ran out of memory), and nothing was uploaded to the Hub. Details in that example's README.
+
 ## Licenses
 
 The suite never uploads or publishes anything. It records the model license, per-component licenses (e.g. the Reverb codec) and

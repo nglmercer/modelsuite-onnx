@@ -190,3 +190,74 @@ def test_recommend_never_picks_a_failing_variant_and_flags_slow_low_precision():
     assert recommend([M("fp32", 10, 100, True), M("fp16", 14, 50, True)], objective="size").recommended == "fp16"
     assert recommend([M("fp32", 10, 100, True)], objective="latency").recommended == "fp32"
     assert recommend([M("fp32", 10, 100, True), M("fp16", None, 50, True)], objective="latency").recommended == "fp32"
+
+
+# ---- streaming external-data consolidation ------------------------------------------------------------------------------------------------
+def _model_with_weights(n=3):
+    from onnx import TensorProto, helper, numpy_helper
+    inits = [numpy_helper.from_array(np.random.default_rng(i).standard_normal((32, 32)).astype(np.float32), f"w{i}") for i in range(n)]
+    nodes, prev = [], "x"
+    for i in range(n):
+        nodes.append(helper.make_node("MatMul", [prev, f"w{i}"], [f"h{i}"]))
+        prev = f"h{i}"
+    g = helper.make_graph(nodes, "g", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 32])], [helper.make_tensor_value_info(prev, TensorProto.FLOAT, [1, 32])], inits)
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 13)])
+    m.ir_version = 8
+    return m, prev
+
+
+@pytest.mark.parametrize("layout", ["embedded", "one-file-per-tensor", "wrong-sidecar-name"])
+def test_consolidate_external_data_handles_every_layout_exporters_leave_behind(tmp_path, layout):
+    """Regression for multi-GB exports: torch writes one file per tensor above 2 GiB; the old code loaded everything into RAM."""
+    from modelsuite.exporters.torch_onnx import consolidate_external_data
+    m, out = _model_with_weights()
+    p = tmp_path / "m.onnx"
+    x = {"x": np.random.default_rng(9).standard_normal((1, 32)).astype(np.float32)}
+    onnx.save(m, str(p))
+    want = create_runner(p, "cpu").run(x)[out]
+    if layout == "one-file-per-tensor":
+        for t in m.graph.initializer:
+            onnx.external_data_helper.set_external_data(t, location=f"{t.name}.bin")
+            (tmp_path / f"{t.name}.bin").write_bytes(t.raw_data)
+            t.ClearField("raw_data")
+        onnx.save(m, str(p))
+    elif layout == "wrong-sidecar-name":
+        onnx.save_model(m, str(p), save_as_external_data=True, all_tensors_to_one_file=True, location="weights.bin", size_threshold=0)
+    assert consolidate_external_data(p) == 3
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["m.onnx", "m.onnx.data"]               # stray per-tensor files are gone
+    assert p.stat().st_size < 2000 and check_graph(p).ok
+    assert np.allclose(create_runner(p, "cpu").run(x)[out], want, atol=1e-6)
+    assert consolidate_external_data(p) == 3                                                     # idempotent: re-running keeps it valid
+    assert np.allclose(create_runner(p, "cpu").run(x)[out], want, atol=1e-6)
+
+
+def test_topological_sort_respects_values_captured_by_loop_bodies():
+    """Regression: the int8 quantiser left a Loop-containing graph unsorted; a node that only a Loop *body* reads must still come first."""
+    from onnx import TensorProto, helper
+    body = helper.make_graph([helper.make_node("Add", ["carried", "outer_const"], ["carried_out"]), helper.make_node("Identity", ["cond"], ["cond_out"])], "body",
+                             [helper.make_tensor_value_info("i", TensorProto.INT64, []), helper.make_tensor_value_info("cond", TensorProto.BOOL, []),
+                              helper.make_tensor_value_info("carried", TensorProto.FLOAT, [1])],
+                             [helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []), helper.make_tensor_value_info("carried_out", TensorProto.FLOAT, [1])])
+    loop = helper.make_node("Loop", ["trip", "", "x"], ["y"], body=body, name="loop")
+    make_const = helper.make_node("Neg", ["x"], ["outer_const"], name="make_const")             # only the loop body uses outer_const
+    g = helper.make_graph([loop, make_const], "g", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1]), helper.make_tensor_value_info("trip", TensorProto.INT64, [])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])])
+    assert passes.topological_sort(g) is True and [n.name for n in g.node] == ["make_const", "loop"]
+
+
+def test_quantised_graph_with_a_loop_is_valid_after_the_pass(tmp_path):
+    """A MatMul feeding a Loop: quantisation inserts nodes; the pass must hand back a graph the strict checker accepts."""
+    from onnx import TensorProto, helper, numpy_helper
+    w = numpy_helper.from_array(np.random.default_rng(0).standard_normal((32, 32)).astype(np.float32), "w")
+    body = helper.make_graph([helper.make_node("Add", ["c", "h"], ["c_out"]), helper.make_node("Identity", ["cond"], ["cond_out"])], "body",
+                             [helper.make_tensor_value_info("i", TensorProto.INT64, []), helper.make_tensor_value_info("cond", TensorProto.BOOL, []),
+                              helper.make_tensor_value_info("c", TensorProto.FLOAT, [1, 32])],
+                             [helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []), helper.make_tensor_value_info("c_out", TensorProto.FLOAT, [1, 32])])
+    g = helper.make_graph([helper.make_node("MatMul", ["x", "w"], ["h"]), helper.make_node("Loop", ["trip", "", "h"], ["y"], body=body)], "g",
+                          [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 32]), helper.make_tensor_value_info("trip", TensorProto.INT64, [])],
+                          [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 32])], [w])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 13)])
+    m.ir_version = 8
+    onnx.save(m, str(tmp_path / "l.onnx"))
+    passes.quantize_int8_dynamic(tmp_path / "l.onnx", tmp_path / "q.onnx")
+    assert check_graph(tmp_path / "q.onnx").ok

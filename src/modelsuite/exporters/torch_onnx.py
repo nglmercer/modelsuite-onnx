@@ -25,22 +25,75 @@ from .torch_support import to_tensor, torch_mod
 log = logging.getLogger("modelsuite.export")
 
 
+def consolidate_external_data(path: Path, min_bytes: int = 1024) -> int:
+    """Rewrite a graph's weights into ONE sidecar `<name>.onnx.data`, streaming tensor by tensor.
+
+    Handles every layout an exporter may leave behind (weights embedded in the proto, one external file per tensor, a differently
+    named sidecar) without ever holding more than the largest tensor in memory -- a naive `onnx.load` + `save_model` needs the
+    whole model in RAM twice, which is what kills multi-GB exports. Returns the number of tensors moved."""
+    onnx = deps.require("onnx", "post-processing exported graphs", "onnx")
+    from onnx import TensorProto
+    model = onnx.load(str(path), load_external_data=False)
+    target = path.name + ".data"
+    tmp = path.parent / (target + ".tmp")
+    old_files: set[Path] = set()
+    moved = 0
+    pos = 0
+    with open(tmp, "wb") as out:
+        for t in model.graph.initializer:
+            if t.data_location == TensorProto.EXTERNAL:
+                info = {e.key: e.value for e in t.external_data}
+                src = path.parent / info["location"]
+                offset = int(info.get("offset", 0))
+                with open(src, "rb") as fh:
+                    fh.seek(offset)
+                    data = fh.read(int(info["length"])) if "length" in info else fh.read()
+                old_files.add(src)
+            elif len(t.raw_data) >= min_bytes:
+                data = bytes(t.raw_data)
+                t.ClearField("raw_data")
+            else:
+                continue
+            out.write(data)
+            del t.external_data[:]
+            t.data_location = TensorProto.EXTERNAL
+            for k, v in (("location", target), ("offset", str(pos)), ("length", str(len(data)))):
+                e = t.external_data.add()
+                e.key, e.value = k, v
+            pos += len(data)
+            moved += 1
+            if pos % 64:                                  # keep every tensor 64-byte aligned (mmap friendly)
+                pad = 64 - pos % 64
+                out.write(b"\0" * pad)
+                pos += pad
+    final = path.parent / target
+    old_files.discard(final)
+    if final.exists():
+        final.unlink()                                    # the previous sidecar was read in full above
+    tmp.replace(final)
+    path.write_bytes(model.SerializeToString())
+    for f in old_files:
+        if f.exists() and f.parent == path.parent:
+            f.unlink()
+    return moved
+
+
 def _isolate_external_data(path: Path, threshold_bytes: int, mode: str) -> None:
     """Normalise how weights are stored: <name>.onnx + <name>.onnx.data when large (or when asked), one file otherwise."""
-    onnx = deps.require("onnx", "post-processing exported graphs", "onnx")
     size = path.stat().st_size
     sidecars = [p for p in path.parent.iterdir() if p.is_file() and p.name != path.name and p.name.startswith(path.stem)
                 and p.suffix != ".onnx"]
-    need = mode == "always" or (mode == "auto" and (size >= threshold_bytes or any(s.name.endswith((".data", "_data")) for s in sidecars)))
-    if not need:
-        return
-    if any(s.name == path.name + ".data" for s in sidecars):
-        return  # already external, in the canonical place
-    model = onnx.load(str(path), load_external_data=True)
-    for s in sidecars:  # exporter-chosen sidecar names are folded into the canonical one
-        s.unlink()
-    onnx.save_model(model, str(path), save_as_external_data=True, all_tensors_to_one_file=True,
-                    location=path.name + ".data", size_threshold=1024, convert_attribute=False)
+    external = any(s.name.endswith((".data", "_data")) for s in sidecars) or _references_external(path)
+    need = mode == "always" or (mode == "auto" and (size >= threshold_bytes or external))
+    if need:
+        consolidate_external_data(path)
+
+
+def _references_external(path: Path) -> bool:
+    onnx = deps.require("onnx")
+    from onnx import TensorProto
+    m = onnx.load(str(path), load_external_data=False)
+    return any(t.data_location == TensorProto.EXTERNAL for t in m.graph.initializer)
 
 
 class _TorchExporter(Exporter):

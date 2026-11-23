@@ -132,6 +132,17 @@ def topological_sort(graph) -> bool:
     return changed
 
 
+def ensure_sorted(path: Path) -> bool:
+    """Rewrite the graph file with its nodes topologically sorted if they are not (weights stay where they are: only the proto is touched).
+    ORT's quantisers append the nodes they create at the end, which the ONNX checker rejects for graphs with sub-graph (Loop/If) captures."""
+    onnx = deps.require("onnx")
+    model = onnx.load(str(path), load_external_data=False)
+    if topological_sort(model.graph):
+        path.write_bytes(model.SerializeToString())
+        return True
+    return False
+
+
 def _structurally_valid(path: Path) -> str | None:
     """None if the saved graph passes the strict ONNX checker, else the error text."""
     onnx = deps.require("onnx")
@@ -260,6 +271,7 @@ def quantize_int8_dynamic(src: Path, dst: Path, op_types: tuple[str, ...] = ("Ma
                            use_external_data_format=_has_external(src) or total_size(src) > 1024 ** 3)
     except Exception as exc:
         raise OptimizationError(f"int8 dynamic quantisation failed: {type(exc).__name__}: {exc}") from exc
+    ensure_sorted(dst)
     return PassResult(path=str(dst), size_bytes=total_size(dst), details={"op_types": list(op_types), "per_channel": per_channel},
                       notes=["weights int8, activations quantised on the fly; accuracy is NOT guaranteed: validate"])
 
@@ -295,6 +307,7 @@ def quantize_int8_static(src: Path, dst: Path, samples: list[dict[str, np.ndarra
                           use_external_data_format=_has_external(src) or total_size(src) > 1024 ** 3)
     except Exception as exc:
         raise OptimizationError(f"int8 static quantisation failed: {type(exc).__name__}: {exc}") from exc
+    ensure_sorted(dst)
     return PassResult(path=str(dst), size_bytes=total_size(dst), details={"calibration_samples": len(samples), "op_types": list(op_types)},
                       notes=[f"calibrated on {len(samples)} sample(s); calibration quality decides accuracy: validate"])
 
@@ -348,6 +361,7 @@ def quantize_int4_weights(src: Path, dst: Path, block_size: int = 32, symmetric:
         quant.model.save_model_to_file(str(dst), use_external_data_format=_has_external(src) or total_size(src) > 1024 ** 3)
     except Exception as exc:
         raise OptimizationError(f"int4 quantisation failed: {type(exc).__name__}: {exc}") from exc
+    ensure_sorted(dst)
     n = sum(1 for nd in load_header(dst).graph.node if nd.op_type == "MatMulNBits")
     if n == 0:
         raise OptimizationError("int4 quantisation changed nothing: no MatMul with a constant weight was found (nothing to quantise)")

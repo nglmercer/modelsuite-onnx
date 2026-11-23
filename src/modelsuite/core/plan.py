@@ -78,6 +78,8 @@ class ComponentExport:
     #: ops (ONNX op types) that quantization must not touch for this component
     quantize_exclude_ops: list[str] = field(default_factory=list)
     stateful_component: bool = False
+    #: called by release(): lets an adapter drop resources it shares between components (a loaded checkpoint, a reference model)
+    on_release: Callable[[], None] | None = None
     _module: Any = field(default=None, repr=False, compare=False)
     _built: bool = field(default=False, repr=False, compare=False)
 
@@ -90,6 +92,8 @@ class ComponentExport:
     def release(self) -> None:
         """Drop the memoised module so its weights can be garbage-collected between components."""
         self._module, self._built = None, False
+        if self.on_release is not None:
+            self.on_release()
 
 
 @dataclass

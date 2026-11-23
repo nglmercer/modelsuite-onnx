@@ -43,6 +43,7 @@ Add `--json` for machine-readable output; every step also writes JSON reports in
 | Custom PyTorch module (`file.py:factory`) | full pipeline; the training-mode hazard of `torch.onnx.export` is guarded |
 | Custom adapter **and** custom exporter from a plugin file, no torch | full pipeline |
 | **Reverb-TTS, real 297M checkpoint + Higgs codec** (`pytest -m slow`) | all 6 graphs exported; official sampler through ONNX reproduces **100 %** of the codes at all 8 codebooks; codec decoder diff 6e-7, encoder codes 100 % identical; sizes match the table below (see [`docs/reverb.md`](docs/reverb.md)) |
+| **ZONOS3-Mini** adapter, a plugin in [`examples/zonos3-mini`](examples/zonos3-mini) (hybrid GDN/attention + MoE LM) | stateful LM graph with ONNX `Loop`s; real 800M weights: logits within 4e-5 of Zyphra's reference, 100 % argmax agreement; full pipeline on a tiny release. **Real codec weights and the full real-weights pipeline were not verified** (out of memory on the dev machine); see its README |
 | **Reverb-TTS** adapter on a tiny fixture (every test run) | official sampler through the ONNX graphs reproduces **100 %** of the original codes; prefix→target KV hand-off passes; dynamic-int8 correctly **fails** (43 % agreement) |
 | Optimum exporter (separate interpreter) | exported + validated against the original (prefill) |
 

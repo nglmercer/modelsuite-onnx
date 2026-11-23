@@ -19,6 +19,24 @@ python examples/zonos3-mini/publish_hf.py artifacts/zonos3-mini --repo <you>/ZON
 Why the reference is not `pip install`ed: `zonos3` pins `transformers<=4.57.3`, `torchaudio==2.9.1` and Python ≥ 3.12, which would downgrade this environment.
 Peak RAM while exporting the LM is ~5.4 GiB (3.2 GiB fp32 reference + the traced graph); the 7.9 GB codec `generator.pt` is memory-mapped.
 
+### End-to-end synthesis from the ONNX graphs
+
+[`run_onnx.py`](run_onnx.py) is the host the two graphs need: the tokenizer, prompt layout, sampler, inter-codebook delay and
+EOS handling come from Zyphra's own plain-Python `zonos3.tts.*` (imported from `ZONOS3_SRC`, nothing installed), the generation
+loop holds the LM state, and the codec decodes the whole take. `--check` runs Zyphra's PyTorch LM with the same seed first and
+compares the generated rows.
+
+```sh
+export RELEASE=$PWD/ZONOS3-Mini                         # the upstream clone: lm/zonos3_mini/ + registries/
+export VOICE=$RELEASE/assets/default_voices/AmericanFemale.embedding.npy
+python examples/zonos3-mini/run_onnx.py \
+  --models artifacts/zonos3-mini/models/fp32 --release "$RELEASE" \
+  --voice "$VOICE" --text "Hello from ONNX." --max-frames 90 -o hello.wav --check
+```
+
+On the real weights: 49 frames (EOS at 38), **49/49 rows identical** to the PyTorch reference, 2.73 s of audio written.
+The text must be already normalised; `--max-frames` must be at least the 10 codebooks or the undelayed take is empty.
+
 ## What is exported
 
 | Graph | Contract |
@@ -76,7 +94,7 @@ Real conversion of `Zyphra/ZONOS3-Mini` @ `2921b88` (CPU, Python 3.14, torch 2.1
 * An `fp16-weights` variant was built but could not be validated: ORT expands 16-bit weights back to fp32 when it loads the graph, which exceeded the 10 GB budget of the machine used. It is **not** part of the published artifact.
 * int4 / int8 variants were not run on the real weights. int4 would not quantise the MoE experts anyway (see limits).
 * CPU only; no GPU provider was tested.
-* The tokenizer, prompt assembly, sampler and speaker encoder are not exported (see above), so **no audio was synthesised end to end**: this validates the two tensor graphs, not a full TTS run.
+* Audio synthesis was run end to end with [`run_onnx.py`](run_onnx.py): Zyphra's own tokenizer/prompt/sampler modules act as the host (they are not exported), producing **49/49 frames identical** to the reference at the same seed and 2.73 s of audio. Text normalisation, new-voice encoding (SSL teacher / speaker encoder) and the codec encoder are still Zyphra-side only.
 * `text_rows` (phoneme / start / pause tokens) is supported by an option but was not validated on the real file.
 
 ## Tests

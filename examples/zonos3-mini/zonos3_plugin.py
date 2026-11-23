@@ -114,7 +114,8 @@ def load_codec(root: Path, audio_codec: str, opts: Zonos3Options):
     generator = torch.load(root / entry["checkpoint"], map_location="cpu", mmap=True, weights_only=True)
     if generator["step"] != entry["codec_step"]:
         raise UnsupportedModelError(f"generator checkpoint is step {generator['step']}, the registry expects {entry['codec_step']}")
-    model = ISTFTCodec(cfg["model"], cfg["head"])
+    from codec_graph import build_empty_codec
+    model = build_empty_codec(cfg["model"], cfg["head"])
     model.load_pretrained(generator["generator"])
     del generator
     ck = campaign / dec["checkpoint"]

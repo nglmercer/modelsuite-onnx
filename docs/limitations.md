@@ -56,8 +56,9 @@ The suite never executes code found inside a *downloaded model repository* unles
 
 ## ZONOS3-Mini example
 
-`examples/zonos3-mini` is verified on the real LM weights in a standalone comparison and end to end on a tiny release; the **real codec decoder and the full
-real-weights pipeline were not completed** (the development machine ran out of memory), and nothing was uploaded to the Hub. Details in that example's README.
+Verified on the real checkpoint: the stateful LM graph and the codec decoder match Zyphra's reference (numbers in `examples/zonos3-mini/README.md`). Not verified: an
+`fp16-weights` variant (ORT expands it to fp32 on load: out of memory on the 15 GB development machine), int8/int4 on the real weights, any GPU provider, and a full
+text-to-audio run (the tokenizer, prompt assembly, sampler and speaker encoder are the host's job). Converting needs ~9-10 GB of RAM at peak.
 
 ## Licenses
 

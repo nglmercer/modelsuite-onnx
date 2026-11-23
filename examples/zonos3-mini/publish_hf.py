@@ -52,7 +52,7 @@ tags: [onnx, text-to-speech, tts, onnxruntime, modelsuite]
 
 # {repo.split('/')[-1]}
 
-ONNX conversion of [`{upstream}`](https://huggingface.co/{upstream}) made with [modelsuite](https://github.com/nglmercer/Reverb-TTS-onnx)
+ONNX conversion of [`{upstream}`](https://huggingface.co/{upstream}) made with [modelsuite](https://github.com/nglmercer/modelsuite-onnx)
 (`examples/zonos3-mini`). **This repository contains the converted graphs only.** The tokenizer, text normalisation, prompt assembly with the
 inter-codebook delay, sampler and speaker encoder are **not** included: the language model and codec decoder are the two tensor graphs below, and the
 host application must provide the rest (reference: Zyphra's `zonos3` package).

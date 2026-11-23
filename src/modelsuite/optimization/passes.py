@@ -203,6 +203,82 @@ def convert_fp16(src: Path, dst: Path, keep_io_types: bool = True, op_block_list
     raise OptimizationError("fp16 conversion failed with every available converter: " + " | ".join(attempts))
 
 
+def _cast_weights_streaming(src: Path, dst: Path, dtype: str, min_elements: int) -> PassResult:
+    """cast_weights for graphs whose weights live in external data: tensors are read, converted and written one at a time, so peak memory is
+    the largest single tensor instead of 2-3x the model (a 4 GB decoder needed >10 GB the other way and was OOM-killed)."""
+    onnx = deps.require("onnx")
+    from onnx import TensorProto, helper
+    model = onnx.load(str(src), load_external_data=False)
+    g = model.graph
+    graph_inputs = {i.name for i in g.input}
+    _clean(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    target = dst.name + ".data"
+    ml = deps.require("ml_dtypes", "bfloat16 weight storage", package="ml_dtypes") if dtype == "bfloat16" else None
+    target_type = TensorProto.FLOAT16 if dtype == "float16" else TensorProto.BFLOAT16
+    out_inits, casts, stats = [], [], {"converted": 0, "kept": 0, "elements": 0}
+    pos = 0
+
+    def raw_of(t) -> bytes | None:
+        if t.data_location == TensorProto.EXTERNAL:
+            info = {e.key: e.value for e in t.external_data}
+            with open(src.parent / info["location"], "rb") as fh:
+                fh.seek(int(info.get("offset", 0)))
+                return fh.read(int(info["length"])) if "length" in info else fh.read()
+        return bytes(t.raw_data) if len(t.raw_data) else None
+
+    with open(dst.with_name(target), "wb") as out:
+        def put(t, data: bytes) -> None:
+            nonlocal pos
+            del t.external_data[:]
+            t.data_location = TensorProto.EXTERNAL
+            t.ClearField("raw_data")
+            for k, v in (("location", target), ("offset", str(pos)), ("length", str(len(data)))):
+                e = t.external_data.add()
+                e.key, e.value = k, v
+            out.write(data)
+            pos += len(data)
+            if pos % 64:
+                out.write(b"\0" * (64 - pos % 64))
+                pos += 64 - pos % 64
+
+        for init in g.initializer:
+            raw = raw_of(init) if init.data_type == TensorProto.FLOAT else None
+            n = int(np.prod(init.dims or [1]))
+            if raw is None or init.name in graph_inputs or n < min_elements:
+                if init.data_location == TensorProto.EXTERNAL:           # unconverted external tensor: copy it into the new sidecar
+                    put(init, raw_of(init))
+                out_inits.append(init)
+                stats["kept"] += 1
+                continue
+            arr = np.frombuffer(raw, np.float32)
+            with np.errstate(over="ignore"):
+                small = arr.astype(np.float16 if dtype == "float16" else ml.bfloat16)
+            if dtype == "float16" and not np.isfinite(small).all() and np.isfinite(arr).all():
+                put(init, raw)                                           # would overflow fp16: keep this tensor in fp32
+                out_inits.append(init)
+                stats["kept"] += 1
+                continue
+            packed = TensorProto()
+            packed.name, packed.data_type = init.name + "__" + dtype, target_type
+            packed.dims.extend(init.dims)
+            put(packed, small.tobytes())
+            out_inits.append(packed)
+            casts.append(helper.make_node("Cast", [packed.name], [init.name], to=TensorProto.FLOAT, name=f"cast_w_{len(casts)}"))
+            stats["converted"] += 1
+            stats["elements"] += n
+            del arr, small, raw
+    del g.initializer[:]
+    g.initializer.extend(out_inits)
+    nodes = list(g.node)
+    del g.node[:]
+    g.node.extend(casts + nodes)
+    dst.write_bytes(model.SerializeToString())
+    return PassResult(path=str(dst), size_bytes=total_size(dst), details={"dtype": dtype, "tensors_converted": stats["converted"], "tensors_kept_fp32": stats["kept"],
+                                                                      "elements_converted": stats["elements"], "streaming": True},
+                      notes=[f"weights stored as {dtype}; compute remains float32; ORT folds the casts at load (file size shrinks, runtime RAM does not)"])
+
+
 def cast_weights(src: Path, dst: Path, dtype: str = "float16", min_elements: int = 128) -> PassResult:
     """Store float32 initialisers as fp16/bf16 and restore them with a Cast at the start of the graph.
 
@@ -214,6 +290,8 @@ def cast_weights(src: Path, dst: Path, dtype: str = "float16", min_elements: int
         raise ConfigError("cast_weights dtype must be float16 or bfloat16")
     if dtype == "bfloat16":
         deps.require("ml_dtypes", "bfloat16 weight storage", package="ml_dtypes")
+    if _has_external(src):
+        return _cast_weights_streaming(src, dst, dtype, min_elements)
     model = _load_full(src)
     g = model.graph
     graph_inputs = {i.name for i in g.input}

@@ -57,19 +57,29 @@ Reference for all of these: Zyphra's `zonos3.tts.*`. The optional `text_rows` (p
 * `int4` does not quantise the MoE experts (they are gathered initialisers, not MatMuls); `fp16-weights` does cover them.
 * Only CPU was tested. The decoder-head checkpoint is loaded with `weights_only=True`; if it ever needs full pickle the adapter refuses unless you pass `allow_pickle=true`.
 
-## What is verified, and what is not (read this first)
+## What is verified, and what is not
 
-| | Status |
+Real conversion of `Zyphra/ZONOS3-Mini` @ `2921b88` (CPU, Python 3.14, torch 2.15, onnxruntime 1.32), validated against Zyphra's own reference on the same inputs:
+
+| Check | Result |
 |---|---|
-| **Real 800M LM weights** | Exported to ONNX (3.4 GiB, one stateful graph) and compared with Zyphra's reference in a standalone run: prefill of 40 rows, a decode step and a 7-row chunk continuing from real state. Logits within **4.4e-5** (scale ≈ 15), argmax agreement **100 %**, GDN state within 5e-7. A decode step took ~0.08 s on a 2-core CPU. The full pipeline export of the LM also completed (72 s) |
-| **Tiny release with the real layout** (tests, offline, ~20 s) | LM + codec decoder through the whole pipeline: parity, dynamic shapes, stateful decode, greedy rollout, fp16-weights passes; int8-dynamic is reported as failing |
-| **Real codec decoder weights** (`generator.pt` 7.9 GB + head 4 GB) | **Not verified.** The checkpoints are downloaded, but the real build did not finish: building the decoder next to the other loaded models exceeded the memory of the development machine (≈5 GB free) and the run was killed. The decoder is verified only on the tiny codec (5e-8 vs the reference) |
-| Full real-weights pipeline (validation of every case, quality check, benchmark, fp16-weights variant) | **Not run to completion.** Needs a machine with roughly 12 GB of free RAM |
-| Hugging Face upload | **Not done** (no credentials on the development machine, and the real artifact is incomplete) |
+| `lm` (800M weights, 3.4 GiB) vs reference: prefill 24 rows with a speaker row + 3 condition rows, a decode step from non-empty state, a 7-row chunk, a 53-row prompt | max abs error **9e-5 … 1.6e-4** on logits of scale ≈ 15, cosine > 0.999999999998, argmax agreement **100 %** |
+| `lm` stateful decode (prefill + 5 single-frame steps, state fed back) | passed; worst step 6.9e-5, free-running drift 6.9e-5 |
+| Greedy 6-frame rollout through the ONNX LM (prefill + decode, state fed back) | **100 %** of the reference tokens |
+| `codec_decoder` (3.8 GiB weights) vs reference, 5 / 24 / 41 frames | max abs error **6e-6 … 1e-5** on audio, energy ratio 1.000 |
+| Output length | exactly 2940 samples per frame |
+| Speed (2-core CPU, 3 iterations) | LM: 428 ms for a 24-row call; a single decode step ≈ 0.08 s; codec decoder: 0.93 s for 24 frames (1.6 s of audio), peak 4.1 GB RAM |
+| Tiny release (tests, offline, ~20 s) | the whole pipeline, plus the int8-dynamic variant correctly reported as failing |
 
-To finish the verification on a bigger machine: run the `convert` command above (the pipeline resumes per component), then `publish_hf.py --dry-run`, then publish.
+**Not verified / not included**
+
+* An `fp16-weights` variant was built but could not be validated: ORT expands 16-bit weights back to fp32 when it loads the graph, which exceeded the 10 GB budget of the machine used. It is **not** part of the published artifact.
+* int4 / int8 variants were not run on the real weights. int4 would not quantise the MoE experts anyway (see limits).
+* CPU only; no GPU provider was tested.
+* The tokenizer, prompt assembly, sampler and speaker encoder are not exported (see above), so **no audio was synthesised end to end**: this validates the two tensor graphs, not a full TTS run.
+* `text_rows` (phoneme / start / pause tokens) is supported by an option but was not validated on the real file.
 
 ## Tests
 
 `ZONOS3_SRC=<clone>/model/src pytest tests/test_zonos3_example.py` builds a tiny randomly initialised release with the real parameter layout
-(`tiny_checkpoint.py`) and runs the whole plugin on it in ~20 s (skipped when `ZONOS3_SRC` is not set).
+(`tiny_checkpoint.py`) and runs the whole plugin on it in ~20 s (skipped when `ZONOS3_SRC` is not set). The real-weights numbers above come from running the `convert` command on a machine with ~12 GB free RAM; it is memory-hungry (peak ~9 GB while validating).

@@ -261,3 +261,38 @@ def test_quantised_graph_with_a_loop_is_valid_after_the_pass(tmp_path):
     onnx.save(m, str(tmp_path / "l.onnx"))
     passes.quantize_int8_dynamic(tmp_path / "l.onnx", tmp_path / "q.onnx")
     assert check_graph(tmp_path / "q.onnx").ok
+
+
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+def test_cast_weights_streaming_path_matches_the_in_memory_path(tmp_path, dtype):
+    """Graphs with external data take the one-tensor-at-a-time path (a 4 GB decoder was OOM-killed by the load-everything path)."""
+    from onnx import TensorProto, helper, numpy_helper
+    rng = np.random.default_rng(0)
+    w = [numpy_helper.from_array(rng.standard_normal((64, 64)).astype(np.float32), f"w{i}") for i in range(3)]
+    big = numpy_helper.from_array(np.full((64, 64), 1e6, np.float32), "huge")       # overflows fp16: must stay fp32
+    idx = numpy_helper.from_array(np.arange(64 * 64, dtype=np.int64), "idx")        # a non-float external tensor must survive the move
+    nodes, prev = [], "x"
+    for i in range(3):
+        nodes.append(helper.make_node("MatMul", [prev, f"w{i}"], [f"h{i}"]))
+        prev = f"h{i}"
+    nodes += [helper.make_node("MatMul", [prev, "huge"], ["m"]), helper.make_node("ReduceSum", ["idx"], ["s"], keepdims=0),
+              helper.make_node("Cast", ["s"], ["sf"], to=TensorProto.FLOAT), helper.make_node("Add", ["m", "sf"], ["y"])]
+    g = helper.make_graph(nodes, "g", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 64])], [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 64])], [*w, big, idx])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 18)])
+    m.ir_version = 9
+    ext, emb = tmp_path / "ext" / "m.onnx", tmp_path / "emb" / "m.onnx"
+    ext.parent.mkdir(), emb.parent.mkdir()
+    onnx.save(m, str(emb))                                                           # first: save_model(external) rewrites m in place
+    onnx.save_model(m, str(ext), save_as_external_data=True, all_tensors_to_one_file=True, location="m.onnx.data", size_threshold=0)
+    r_stream = passes.cast_weights(ext, tmp_path / "ext" / "out.onnx", dtype)
+    r_mem = passes.cast_weights(emb, tmp_path / "emb" / "out.onnx", dtype)
+    assert r_stream.details.get("streaming") is True and "streaming" not in r_mem.details
+    converted = 3 if dtype == "float16" else 4        # 1e6 overflows fp16 (kept fp32) but fits bfloat16, which has fp32's exponent range
+    assert r_stream.details["tensors_converted"] == r_mem.details["tensors_converted"] == converted
+    checked = check_graph(tmp_path / "ext" / "out.onnx")
+    assert checked.ok, checked.errors
+    x = {"x": rng.standard_normal((1, 64)).astype(np.float32)}
+    a = create_runner(tmp_path / "ext" / "out.onnx", "cpu", graph_level="none").run(x)["y"]
+    b = create_runner(tmp_path / "emb" / "out.onnx", "cpu", graph_level="none").run(x)["y"]
+    assert np.allclose(a, b, rtol=1e-6, atol=1e-6) and np.isfinite(a).all()
+    assert total_size(tmp_path / "ext" / "out.onnx") < 0.85 * total_size(ext)        # the kept fp32 + int64 tensors are most of this tiny graph

@@ -155,3 +155,24 @@ def test_without_the_reference_code_the_adapter_says_how_to_get_it(release, tmp_
     j = JobConfig.model_validate({"model": str(release), "output": str(tmp_path / "o")})
     with pytest.raises(UnsupportedModelError, match="ZONOS3_SRC"):
         pipeline.convert(j)
+
+
+def test_meta_built_codec_equals_the_normally_built_one(release):
+    """The real checkpoint is loaded through build_empty_codec (the normal constructor needs ~8 GB for parts it discards): same function, tiny model."""
+    import torch
+    from reference_env import ensure_reference
+    ensure_reference(SRC, codec=True)
+    from tiny_checkpoint import tiny_codec_config
+    from codec_graph import build_empty_codec
+    from zonos3.codec.istft_head_a_20261002.model import ISTFTCodec
+    cfg, head = tiny_codec_config()
+    blob = torch.load(release / "tiny_codec.pt", map_location="cpu", weights_only=True)
+    normal = ISTFTCodec(blob["cfg"], blob["head"])
+    normal.load_state_dict(blob["state"], strict=True)
+    lean = build_empty_codec(blob["cfg"], blob["head"])
+    missing = lean.load_state_dict(blob["state"], strict=False)
+    assert not missing.unexpected_keys and all(k.startswith("head.window_") or k == "" for k in missing.missing_keys) or not missing.missing_keys
+    codes = torch.from_numpy(np.random.default_rng(3).integers(0, 4096, (1, 10, 9)))
+    with torch.inference_mode():
+        a, b = normal.eval()(codes), lean.eval()(codes)
+    assert torch.allclose(a, b, atol=1e-7) and not any(p.is_meta for p in lean.parameters())

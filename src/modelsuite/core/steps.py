@@ -567,6 +567,11 @@ def validate(ctx: JobContext, variants: list[str] | None = None, providers: list
                     res["providers"] = prov_out
             except Exception as exc:
                 res["parity"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "trace": traceback.format_exc(limit=4)}
+            # Free this component's session before the next one loads: a variant stored in 16 bit is expanded to fp32 when ORT loads it, so holding every
+            # component's session at once needs the whole model's fp32 size (~7 GB for ZONOS3). Quality checks re-create the sessions they need.
+            runners.pop((vn, rec.name), None)
+            import gc
+            gc.collect()
             comp_results[rec.name] = res
         # quality checks need every component of the variant
         qres: list[dict[str, Any]] = []

@@ -123,3 +123,31 @@ class CodecDecoderGraph(torch.nn.Module):
         w = F.pad(internal.reshape(1, -1), (self.rs_width, self.rs_width + self.rs_orig))
         res = F.conv1d(w.unsqueeze(1), self.rs_kernel, stride=self.rs_orig).transpose(1, 2).reshape(1, -1)
         return res[0, : frames * self.m.external_hop][None, None]
+
+
+def build_empty_codec(cfg: dict, head_cfg: dict):
+    """`ISTFTCodec(cfg, head)` without ever materialising the parts it throws away.
+
+    ISTFTCodec.__init__ first builds a *complete* MossCodec (encoder + decoder, ~8 GB of randomly initialised fp32 for the release) and then keeps only
+    decoder stages 0-8, the quantizer, the semantic head and the resampler. Constructing it on the meta device costs no memory; `to_empty` then allocates
+    only what is kept, and the checkpoint fills it. Non-persistent buffers (the Hann windows) are not in any state dict, so they are recomputed here."""
+    import torch
+    import torchaudio.transforms as T
+    from zonos3.codec.istft_head_a_20261002.model import ISTFTCodec
+    # torchaudio's Resample computes its sinc kernel numerically when built, so it cannot live on the meta device; its (small) kernel is part of the
+    # checkpoint (`to_external.kernel`) and is overwritten on load anyway. Build only the resamplers on the real device.
+    original = T.Resample.__init__
+
+    def real_device_init(self, *a, **k):
+        with torch.device("cpu"):
+            original(self, *a, **k)
+    T.Resample.__init__ = real_device_init
+    try:
+        with torch.device("meta"):
+            model = ISTFTCodec(cfg, head_cfg)
+    finally:
+        T.Resample.__init__ = original
+    model.to_empty(device="cpu")
+    for i, n in enumerate(model.head.n_ffts):
+        getattr(model.head, f"window_{i}").copy_(torch.hann_window(n, periodic=True))
+    return model

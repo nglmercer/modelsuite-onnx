@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -24,6 +25,36 @@ def sha256(p: Path) -> str:
         while block := fh.read(1 << 20):
             h.update(block)
     return h.hexdigest()
+
+
+def scrub(text: str, art: Path) -> str:
+    """No local paths in published files: the artifact directory becomes '.', home directories '~', temp directories '<tmp>'."""
+    text = text.replace(str(art), ".")
+    text = re.sub(r"/home/[^/\"\s]+", "~", text)
+    return re.sub(r"/tmp/[^\"\s,]+", "<tmp>", text)
+
+
+def measured(m: dict, variants: list[str]) -> str:
+    """A small table of the numbers behind 'validation passed', taken from the manifest (nothing is typed in by hand)."""
+    v = m["variants"][variants[0]].get("validation") or {}
+    lines = ["| graph | cases | max abs error vs reference | min cosine | argmax agreement |", "|---|---|---|---|---|"]
+    for name, r in (v.get("components") or {}).items():
+        cases = (r.get("parity") or {}).get("cases", [])
+        if not cases:
+            continue
+        outs = [o for c in cases for o in c["outputs"]]
+        cos = [o["cosine"] for o in outs if o.get("cosine") is not None]
+        arg = [o["argmax_agreement"] for o in outs if o.get("argmax_agreement") is not None]
+        lines.append(f"| `{name}` | {', '.join(c['name'] for c in cases)} | {max(c['summary']['max_abs'] for c in cases):.1e} | "
+                     f"{min(cos):.12f} | {min(arg) * 100:.0f} % |" if cos and arg else
+                     f"| `{name}` | {', '.join(c['name'] for c in cases)} | {max(c['summary']['max_abs'] for c in cases):.1e} | {min(cos):.12f} | n/a |" if cos else
+                     f"| `{name}` | {', '.join(c['name'] for c in cases)} | {max(c['summary']['max_abs'] for c in cases):.1e} | n/a | n/a |")
+    for name, r in (v.get("components") or {}).items():
+        for st in r.get("stateful", []):
+            lines.append(f"\nStateful `{name}` / `{st['case']}`: {st['status']}, {len(st['steps'])} steps, worst step error {st['worst_max_abs']:.1e}.")
+    for q in v.get("quality", []):
+        lines.append(f"\nQuality check `{q['name']}`: {'passed' if q['passed'] else 'FAILED'}: {q['message']}.")
+    return "\n".join(lines)
 
 
 def model_card(m: dict, repo: str, variants: list[str], upstream: str, files: list[tuple[str, int]]) -> str:
@@ -42,6 +73,7 @@ def model_card(m: dict, repo: str, variants: list[str], upstream: str, files: li
         comps.append(f"### `{c['name']}`{' (stateful)' if c.get('stateful') else ''}\n\n{c.get('description', '')}\n\n- inputs: {ins}\n- outputs: {outs}\n"
                      + "".join(f"- known issue: {k}\n" for k in c.get("known_issues", [])))
     notices = "".join(f"- {n}\n" for n in (m.get("redistribution") or {}).get("required_notices", []))
+    table = measured(m, variants)
     return f"""---
 license: {lic}
 base_model: {upstream}
@@ -65,9 +97,13 @@ Original model, weights and training: Zyphra, Apache-2.0. Please cite and credit
 |---|---|---|---|
 {chr(10).join(rows)}
 
-`fp16-weights` stores the weights in 16 bit and casts back to fp32 at load: the file is smaller, compute and runtime RAM are the same as `fp32`.
-Validation of the published variants: **{val}**. Validation compares every graph with Zyphra's reference implementation on the same inputs
-(prefill, decode steps, different shapes, and a multi-step stateful decode); the numbers are in `reports/validation.json`.
+Validation of the published variants: **{val}**. Every graph is compared with Zyphra's reference implementation on the same inputs
+(prefill with a speaker row and condition rows, decode steps, different shapes, a multi-step stateful decode and a greedy rollout); full numbers in `reports/validation.json`.
+
+{table}
+
+Not validated and therefore not published: 16-bit / int8 / int4 variants. Only CPU was tested. No end-to-end audio was synthesised (the tokenizer, sampler
+and speaker encoder are the host's job), so this validates the two tensor graphs, not a full TTS run.
 
 ## Graphs
 
@@ -147,7 +183,9 @@ def main() -> int:
     pub["variants"] = {v: m["variants"][v] for v in a.variants}
     pub["default_variant"] = a.variants[0]
     pub["environment"] = {k: v for k, v in (m.get("environment") or {}).items() if k != "platform"}
-    (stage / "manifest.json").write_text(json.dumps(pub, indent=2) + "\n")
+    (stage / "manifest.json").write_text(scrub(json.dumps(pub, indent=2), art) + "\n")
+    for r in (stage / "reports").glob("*"):
+        r.write_text(scrub(r.read_text(), art))
     listing = sorted((p.relative_to(stage).as_posix(), p.stat().st_size) for p in stage.rglob("*") if p.is_file())
     (stage / "README.md").write_text(model_card(pub, a.repo, a.variants, a.upstream, listing))
     sums = [f"{sha256(p)}  {p.relative_to(stage).as_posix()}" for p in sorted(stage.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"]
